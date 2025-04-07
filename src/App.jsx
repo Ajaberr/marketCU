@@ -1,10 +1,28 @@
-import { useState, useContext, createContext, useEffect, useRef } from 'react';
+import { useState, useContext, createContext, useEffect, useRef, Fragment } from 'react';
 import { BrowserRouter as Router, Route, Routes, Link, Navigate, useParams, useNavigate } from 'react-router-dom';
 import './App.css';
 import './Chat.css';
 import logo from './assets/Collegiate Logo.png';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+import LoginPage from './components/LoginPage';
+import HomePage from './components/HomePage';
+
+// API Base URL Configuration
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+
+// Define product categories for consistency
+const PRODUCT_CATEGORIES = [
+  "Laptops & Accessories",
+  "Textbooks & Study Guides",
+  "Dorm & Apartment Essentials",
+  "Bicycles & Scooters",
+  "Electronics & Gadgets",
+  "Furniture & Storage",
+  "Clothing & Fashion",
+  "School Supplies"
+];
 
 // Create Auth Context
 const AuthContext = createContext();
@@ -21,7 +39,14 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     // Check if we have a token in localStorage
     const storedToken = localStorage.getItem('token');
-    const storedUser = JSON.parse(localStorage.getItem('user'));
+    
+    // Support both old and new user data formats
+    let storedUser;
+    try {
+      storedUser = JSON.parse(localStorage.getItem('user'));
+    } catch (e) {
+      // Ignore parsing errors
+    }
     
     if (storedToken && storedUser) {
       setToken(storedToken);
@@ -31,9 +56,10 @@ export function AuthProvider({ children }) {
     setLoading(false);
   }, []);
 
+  // Keeping the old login methods for backward compatibility
   const login = async (usernameOrEmail, password) => {
     try {
-      const response = await axios.post('http://localhost:3001/api/login', {
+      const response = await axios.post(`${API_BASE_URL}/login`, {
         usernameOrEmail,
         password
       });
@@ -55,7 +81,7 @@ export function AuthProvider({ children }) {
 
   const register = async (username, email, password) => {
     try {
-      const response = await axios.post('http://localhost:3001/api/register', {
+      const response = await axios.post(`${API_BASE_URL}/register`, {
         username,
         email,
         password
@@ -76,6 +102,15 @@ export function AuthProvider({ children }) {
     }
   };
 
+  // Method for email verification login
+  const verifyEmailLogin = (token, userData) => {
+    localStorage.setItem('token', token);
+    localStorage.setItem('user', JSON.stringify(userData));
+    
+    setToken(token);
+    setCurrentUser(userData);
+  };
+
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
@@ -85,7 +120,7 @@ export function AuthProvider({ children }) {
 
   // Create axios instance with auth headers
   const authAxios = axios.create({
-    baseURL: 'http://localhost:3001/api'
+    baseURL: API_BASE_URL
   });
   
   authAxios.interceptors.request.use(
@@ -104,6 +139,7 @@ export function AuthProvider({ children }) {
     currentUser,
     login,
     register,
+    verifyEmailLogin,
     logout,
     authAxios,
     isAuthenticated: !!currentUser
@@ -123,7 +159,7 @@ export function HeadBar() {
     <div className="header">
       <div className="leftside">
         <img src={logo} alt="Collegiate Logo" className="logo" />
-        <Link to="/" className="nav-link">HOME</Link>
+        <Link to="/home" className="nav-link">HOME</Link>
         <Link to="/market" className="nav-link">MARKET</Link>
         {isAuthenticated && <Link to="/create-product" className="nav-link">SELL ITEM</Link>}
         {isAuthenticated && <Link to="/chats" className="nav-link">MESSAGES</Link>}
@@ -133,7 +169,7 @@ export function HeadBar() {
           <Link to="/" className="sign-in-btn">Sign in</Link>
         ) : (
           <>
-            <span className="username">{currentUser.username}</span>
+            <span className="username">{currentUser?.email || 'User'}</span>
             <button onClick={logout} className="sign-in-btn">Logout</button>
           </>
         )}
@@ -143,183 +179,145 @@ export function HeadBar() {
   );
 }
 
-function HomePage() {
-  const { login, register, isAuthenticated } = useAuth();
+function SignInPage() {
+  const { verifyEmailLogin, isAuthenticated } = useAuth();
   const navigate = useNavigate();
-  const [isSignIn, setIsSignIn] = useState(true);
-  const [formData, setFormData] = useState({
-    username: '',
-    email: '',
-    password: '',
-    keepSignedIn: false
-  });
-  const [showPassword, setShowPassword] = useState(false);
+  const [codeSent, setCodeSent] = useState(false);
+  const [email, setEmail] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   // Redirect if already logged in
   useEffect(() => {
     if (isAuthenticated) {
-      navigate('/market');
+      navigate('/home');
     }
   }, [isAuthenticated, navigate]);
 
-  const handleChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setFormData({
-      ...formData,
-      [name]: type === 'checkbox' ? checked : value
-    });
-  };
-
-  const handleSubmit = async (e) => {
+  const handleSendCode = async (e) => {
     e.preventDefault();
+    
+    if (!email.endsWith('@columbia.edu')) {
+      setError('Only Columbia University emails are allowed');
+      return;
+    }
+    
+    setLoading(true);
     setError(null);
     
     try {
-      if (isSignIn) {
-        // Login
-        await login(formData.username, formData.password);
-      } else {
-        // Register
-        if (!formData.username || !formData.email || !formData.password) {
-          setError('All fields are required');
-          return;
-        }
-        await register(formData.username, formData.email, formData.password);
+      const response = await axios.post(`${API_BASE_URL}/auth/verify-email`, { email });
+      setCodeSent(true);
+      
+      // For development, auto-fill the code if returned in response
+      if (response.data.code) {
+        setVerificationCode(response.data.code);
       }
-      navigate('/market');
     } catch (err) {
-      setError(err.response?.data?.error || 'Authentication failed. Please try again.');
-      console.error('Auth error:', err);
+      setError(err.response?.data?.error || 'Failed to send verification code');
+      console.error('Email verification error:', err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const togglePasswordVisibility = () => {
-    setShowPassword(!showPassword);
-  };
-
-  const toggleAuthMode = () => {
-    setIsSignIn(!isSignIn);
+  const handleVerifyCode = async (e) => {
+    e.preventDefault();
+    
+    setLoading(true);
     setError(null);
+    
+    try {
+      const response = await axios.post(`${API_BASE_URL}/auth/verify-code`, { 
+        email, 
+        code: verificationCode 
+      });
+      
+      // Use the authContext method instead of manually setting localStorage
+      verifyEmailLogin(response.data.token, { id: response.data.userId, email });
+      
+      // Navigate to home
+      navigate('/home');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Invalid or expired verification code');
+      console.error('Code verification error:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div className='body'>
-      <HeadBar />
       <div className="sign-in-container">
         <h1 className="sign-in-title">
-          {isSignIn ? 'Sign in to your account' : 'Create a new account'}
+          Columbia Marketplace
         </h1>
 
         <div className="form-container">
-          <p className="required-field-note">* indicates required field</p>
-          
-          {error && <div className="auth-error">{error}</div>}
+          {!codeSent ? (
+            <form onSubmit={handleSendCode}>
+              <p className="required-field-note">* indicates required field</p>
+              
+              {error && <div className="auth-error">{error}</div>}
 
-          <form onSubmit={handleSubmit}>
-            {!isSignIn && (
               <div className="form-field">
-                <label htmlFor="username" className="sr-only">Username</label>
+                <label htmlFor="email" className="sr-only">Columbia Email</label>
                 <input
-                  type="text"
-                  id="username"
-                  name="username"
-                  placeholder="* Username"
-                  value={formData.username}
-                  onChange={handleChange}
+                  type="email"
+                  id="email"
+                  name="email"
+                  placeholder="* Columbia Email (@columbia.edu)"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   required
                   className="form-input"
                 />
               </div>
-            )}
 
-            <div className="form-field">
-              <label htmlFor="username" className="sr-only">
-                {isSignIn ? 'Username or email address' : 'Email address'}
-              </label>
-              <input
-                type={isSignIn ? "text" : "email"}
-                id={isSignIn ? "usernameOrEmail" : "email"}
-                name={isSignIn ? "username" : "email"}
-                placeholder={isSignIn ? "* Username or email address" : "* Email address"}
-                value={isSignIn ? formData.username : formData.email}
-                onChange={handleChange}
-                required
-                className="form-input"
-              />
-            </div>
+              <div className="form-actions">
+                <button type="submit" className="sign-in-button" disabled={loading}>
+                  {loading ? 'Sending...' : 'Send Verification Code'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={handleVerifyCode}>
+              <p className="required-field-note">A verification code has been sent to your email</p>
+              
+              {error && <div className="auth-error">{error}</div>}
 
-            <div className="form-field password-field">
-              <label htmlFor="password" className="sr-only">Password</label>
-              <input
-                type={showPassword ? "text" : "password"}
-                id="password"
-                name="password"
-                placeholder="* Password"
-                value={formData.password}
-                onChange={handleChange}
-                required
-                className="form-input"
-              />
-              <button
-                type="button"
-                onClick={togglePasswordVisibility}
-                className="password-toggle"
-                aria-label={showPassword ? "Hide password" : "Show password"}
-              >
-                <svg viewBox="0 0 24 24" width="24" height="24" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-                  {showPassword ? (
-                    <>
-                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                      <line x1="1" y1="1" x2="23" y2="23" />
-                    </>
-                  ) : (
-                    <>
-                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                      <circle cx="12" cy="12" r="3" />
-                    </>
-                  )}
-                </svg>
-              </button>
-            </div>
-
-            {isSignIn && (
-              <div className="form-field checkbox-field">
+              <div className="form-field">
+                <label htmlFor="verificationCode" className="sr-only">Verification Code</label>
                 <input
-                  type="checkbox"
-                  id="keepSignedIn"
-                  name="keepSignedIn"
-                  checked={formData.keepSignedIn}
-                  onChange={handleChange}
-                  className="checkbox-input"
+                  type="text"
+                  id="verificationCode"
+                  name="verificationCode"
+                  placeholder="* Verification Code"
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  required
+                  className="form-input"
                 />
-                <label htmlFor="keepSignedIn" className="checkbox-label">
-                  Keep me signed in.
-                </label>
               </div>
-            )}
 
-            <div className="auth-toggle">
-              {isSignIn ? (
-                <p>Don't have an account? <button type="button" onClick={toggleAuthMode} className="toggle-auth-btn">Create Account</button></p>
-              ) : (
-                <p>Already have an account? <button type="button" onClick={toggleAuthMode} className="toggle-auth-btn">Sign In</button></p>
-              )}
-            </div>
-
-            {isSignIn && (
-              <div className="forgotten-links">
-                <a href="#forgot-username" className="forgot-link">Forgot your username?</a>
-                <a href="#forgot-password" className="forgot-link">Forgot your password?</a>
+              <div className="form-actions">
+                <button type="submit" className="sign-in-button" disabled={loading}>
+                  {loading ? 'Verifying...' : 'Verify Code'}
+                </button>
               </div>
-            )}
-
-            <div className="form-actions">
-              <button type="submit" className="sign-in-button">
-                {isSignIn ? 'Sign in' : 'Create Account'}
-              </button>
-            </div>
-          </form>
+              
+              <div className="auth-toggle">
+                <button 
+                  type="button" 
+                  className="toggle-auth-btn"
+                  onClick={() => setCodeSent(false)}
+                >
+                  Try a different email
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     </div>
@@ -334,11 +332,12 @@ function MarketPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [maxPrice, setMaxPrice] = useState(1000); // Default max price
+  const [searchQuery, setSearchQuery] = useState(''); // Add search query state
 
   useEffect(() => {
     const fetchProducts = async () => {
       try {
-        const response = await axios.get('http://localhost:3001/api/products');
+        const response = await axios.get(`${API_BASE_URL}/products`);
         // Sort products by creation date, newest first
         const sortedProducts = response.data.sort((a, b) => 
           new Date(b.created_at) - new Date(a.created_at)
@@ -379,11 +378,19 @@ function MarketPage() {
     setPriceRange([priceRange[0], Number(event.target.value)]);
   };
 
-  // Filter products based on selected filters
+  const handleSearchChange = (event) => {
+    setSearchQuery(event.target.value);
+  };
+
+  // Filter products based on selected filters and search
   const filteredProducts = products.filter(product => {
     const matchesCategory = selectedCategories.length === 0 || selectedCategories.includes(product.category);
     const matchesPrice = product.price >= priceRange[0] && product.price <= priceRange[1];
-    return matchesCategory && matchesPrice;
+    const matchesSearch = searchQuery === '' || 
+      product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.details.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.category.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesCategory && matchesPrice && matchesSearch;
   });
 
   // Sort products
@@ -395,14 +402,12 @@ function MarketPage() {
 
   if (loading) return (
     <div className="market-page">
-      <HeadBar />
       <div className="loading">Loading products...</div>
     </div>
   );
 
   if (error) return (
     <div className="market-page">
-      <HeadBar />
       <div className="error">{error}</div>
     </div>
   );
@@ -410,8 +415,6 @@ function MarketPage() {
   // Render the market page with products
   return (
     <div className="market-page">
-      <HeadBar />
-      
       <div className="market-container">
         <div className="market-header">
           <div className="market-title">
@@ -419,15 +422,14 @@ function MarketPage() {
             <p>The ultimate every day collection with the cheapest and best student utilities.</p>
           </div>
           
-          <div className="watch-categories">
-            <Link to="#" className="category-link">Laptops & Accessories</Link>
-            <Link to="#" className="category-link">Textbooks & Study Guides</Link>
-            <Link to="#" className="category-link">Dorm & Apartment Essentials</Link>
-            <Link to="#" className="category-link">Bicycles & Scooters</Link>
-            <Link to="#" className="category-link">Electronics & Gadgets</Link>
-            <Link to="#" className="category-link">Furniture & Storage</Link>
-            <Link to="#" className="category-link">Clothing & Fashion</Link>
-            <Link to="#" className="category-link">School Supplies</Link>
+          <div className="search-container">
+            <input
+              type="text"
+              placeholder="Search products..."
+              value={searchQuery}
+              onChange={handleSearchChange}
+              className="search-input"
+            />
           </div>
         </div>
 
@@ -440,7 +442,6 @@ function MarketPage() {
             <div className="filter-section">
               <div className="filter-header">
                 <h3>Price</h3>
-                <button className="toggle-btn">−</button>
               </div>
               <div className="price-range">
                 <div className="range-slider">
@@ -463,7 +464,6 @@ function MarketPage() {
             <div className="filter-section">
               <div className="filter-header">
                 <h3>Categories</h3>
-                <button className="toggle-btn">−</button>
               </div>
               <div className="gender-options">
                 <div className="filter-option">
@@ -596,8 +596,10 @@ function ProductDetailPage() {
   useEffect(() => {
     const fetchProduct = async () => {
       try {
-        const response = await axios.get(`http://localhost:3001/api/products/${id}`);
+        console.log(`Fetching product details for ID: ${id}`);
+        const response = await axios.get(`${API_BASE_URL}/products/${id}`);
         setProduct(response.data);
+        console.log("Product data received:", response.data);
       } catch (err) {
         console.error('Error fetching product details:', err);
         setError('Failed to load product details. Product may not exist.');
@@ -616,29 +618,32 @@ function ProductDetailPage() {
     }
 
     try {
+      console.log(`Creating chat for product: ${product.id} with seller: ${product.seller_id}`);
+      
       // Create or get chat for this product
       const response = await authAxios.post('/chats', {
-        product_id: product.id
+        product_id: product.id,
+        seller_id: product.seller_id
       });
       
+      console.log("Chat created/retrieved:", response.data);
+      
       // Navigate to the chat
-      navigate(`/chats/${response.data.chat.id}`);
+      navigate(`/chats/${response.data.id}`);
     } catch (err) {
-      console.error('Error creating chat:', err);
+      console.error('Error creating chat:', err.response?.data || err.message);
       alert('Failed to contact seller. Please try again.');
     }
   };
 
   if (loading) return (
     <div className="product-detail-page">
-      <HeadBar />
       <div className="loading">Loading product details...</div>
     </div>
   );
 
   if (error || !product) return (
     <div className="product-detail-page">
-      <HeadBar />
       <div className="error">{error || 'Product not found'}</div>
     </div>
   );
@@ -647,7 +652,6 @@ function ProductDetailPage() {
 
   return (
     <div className="product-detail-page">
-      <HeadBar />
       <div className="product-detail-container">
         <div className="product-detail-left">
           <img 
@@ -661,7 +665,7 @@ function ProductDetailPage() {
           <div className="product-detail-price">${product.price.toLocaleString()}</div>
           
           <div className="product-detail-seller">
-            <p>Seller: {product.seller_name}</p>
+            <p>Seller: {product.seller?.email || 'Unknown'}</p>
           </div>
           
           <div className="product-detail-info">
@@ -707,6 +711,8 @@ function CreateProductPage() {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [imageError, setImageError] = useState('');
+  const [previewImage, setPreviewImage] = useState('');
+  const [uploadMethod, setUploadMethod] = useState('url'); // 'url' or 'file'
 
   const validateImageUrl = async (url) => {
     try {
@@ -728,6 +734,33 @@ function CreateProductPage() {
     // Clear image error when user starts typing new URL
     if (name === 'image_path') {
       setImageError('');
+      if (value) {
+        setPreviewImage(value);
+      } else {
+        setPreviewImage('');
+      }
+    }
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (!file.type.startsWith('image/')) {
+        setImageError('Please upload a valid image file');
+        return;
+      }
+      
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64Image = event.target.result;
+        setPreviewImage(base64Image);
+        setFormData({
+          ...formData,
+          image_path: base64Image
+        });
+        setImageError('');
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -737,8 +770,8 @@ function CreateProductPage() {
     setImageError('');
 
     try {
-      // Validate image URL if provided
-      if (formData.image_path) {
+      // Validate image URL if provided and using URL method
+      if (uploadMethod === 'url' && formData.image_path) {
         const isValidImage = await validateImageUrl(formData.image_path);
         if (!isValidImage) {
           setImageError('Please provide a valid image URL');
@@ -760,12 +793,17 @@ function CreateProductPage() {
 
   return (
     <div className="create-product-page">
-      <HeadBar />
       <div className="create-product-container">
-        <h1>Sell an Item</h1>
+        <div className="columbia-header">
+          <div className="columbia-logo">
+            <img src={logo} alt="Columbia University" />
+          </div>
+          <h1>Student Marketplace</h1>
+        </div>
+        
         <form onSubmit={handleSubmit} className="create-product-form">
           <div className="form-group">
-            <label htmlFor="name">Product Name *</label>
+            <label htmlFor="name">Product Name</label>
             <input
               type="text"
               id="name"
@@ -778,36 +816,7 @@ function CreateProductPage() {
           </div>
           
           <div className="form-group">
-            <label htmlFor="details">Details *</label>
-            <textarea
-              id="details"
-              name="details"
-              value={formData.details}
-              onChange={handleChange}
-              required
-              placeholder="Describe your item, including features and any defects"
-            />
-          </div>
-          
-          <div className="form-group">
-            <label htmlFor="condition">Condition *</label>
-            <select
-              id="condition"
-              name="condition"
-              value={formData.condition}
-              onChange={handleChange}
-              required
-            >
-              <option value="New">New</option>
-              <option value="Like new">Like new</option>
-              <option value="Good condition">Good condition</option>
-              <option value="Fair condition">Fair condition</option>
-              <option value="Poor condition">Poor condition</option>
-            </select>
-          </div>
-          
-          <div className="form-group">
-            <label htmlFor="price">Price ($) *</label>
+            <label htmlFor="price">Price ($)</label>
             <input
               type="number"
               id="price"
@@ -817,12 +826,30 @@ function CreateProductPage() {
               required
               min="0.01"
               step="0.01"
-              placeholder="e.g., 99.99"
+              placeholder="e.g., 999.99"
             />
           </div>
           
           <div className="form-group">
-            <label htmlFor="category">Category *</label>
+            <label htmlFor="condition">Condition</label>
+            <select
+              id="condition"
+              name="condition"
+              value={formData.condition}
+              onChange={handleChange}
+              required
+            >
+              <option value="">Select</option>
+              <option value="New">New</option>
+              <option value="Like new">Like new</option>
+              <option value="Good condition">Good condition</option>
+              <option value="Fair condition">Fair condition</option>
+              <option value="Poor condition">Poor condition</option>
+            </select>
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="category">Category</label>
             <select
               id="category"
               name="category"
@@ -830,7 +857,7 @@ function CreateProductPage() {
               onChange={handleChange}
               required
             >
-              <option value="">Select a category</option>
+              <option value="">Select</option>
               <option value="Laptops & Accessories">Laptops & Accessories</option>
               <option value="Textbooks & Study Guides">Textbooks & Study Guides</option>
               <option value="Dorm & Apartment Essentials">Dorm & Apartment Essentials</option>
@@ -843,16 +870,72 @@ function CreateProductPage() {
           </div>
           
           <div className="form-group">
-            <label htmlFor="image_path">Image URL</label>
-            <input
-              type="text"
-              id="image_path"
-              name="image_path"
-              value={formData.image_path}
+            <label htmlFor="details">Details</label>
+            <textarea
+              id="details"
+              name="details"
+              value={formData.details}
               onChange={handleChange}
-              placeholder="Enter an image URL or leave blank for placeholder"
+              required
+              placeholder="Describe your item, including features and any defects"
             />
+          </div>
+          
+          <div className="form-group">
+            <label>Product Image</label>
+            
+            <div className="upload-options">
+              <button 
+                type="button" 
+                className={`upload-option-btn ${uploadMethod === 'url' ? 'active' : ''}`}
+                onClick={() => setUploadMethod('url')}
+              >
+                Use URL
+              </button>
+              <button 
+                type="button" 
+                className={`upload-option-btn ${uploadMethod === 'file' ? 'active' : ''}`}
+                onClick={() => setUploadMethod('file')}
+              >
+                Upload File
+              </button>
+            </div>
+            
+            {uploadMethod === 'url' ? (
+              <input
+                type="text"
+                id="image_path"
+                name="image_path"
+                value={formData.image_path}
+                onChange={handleChange}
+                placeholder="Enter an image URL"
+              />
+            ) : (
+              <div className="file-upload-container">
+                <input
+                  type="file"
+                  id="image_file"
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="file-upload-input"
+                />
+                <label htmlFor="image_file" className="file-upload-label">
+                  Choose a file
+                </label>
+              </div>
+            )}
+            
             {imageError && <div className="error-message">{imageError}</div>}
+            
+            {previewImage ? (
+              <div className="image-preview">
+                <img src={previewImage} alt="Product preview" />
+              </div>
+            ) : (
+              <div className="image-preview empty">
+                <span>No Image preview available</span>
+              </div>
+            )}
           </div>
           
           <button 
@@ -860,7 +943,7 @@ function CreateProductPage() {
             className="create-product-button"
             disabled={isSubmitting}
           >
-            {isSubmitting ? 'Creating...' : 'Create Listing'}
+            {isSubmitting ? 'Creating...' : 'List Item for Sale'}
           </button>
         </form>
       </div>
@@ -882,10 +965,13 @@ function ChatsListPage() {
 
     const fetchChats = async () => {
       try {
+        console.log('Fetching chats for user');
         const response = await authAxios.get('/chats');
+        console.log('Chats received:', response.data);
         setChats(response.data);
       } catch (err) {
-        console.error('Error fetching chats:', err);
+        console.error('Error fetching chats:', err.response?.data || err.message);
+        alert('Failed to load chats. Please try again.');
       } finally {
         setLoading(false);
       }
@@ -894,41 +980,44 @@ function ChatsListPage() {
     fetchChats();
   }, [authAxios, isAuthenticated, navigate]);
 
-  if (loading) return <div className="loading">Loading chats...</div>;
+  if (loading) return (
+    <div className="chats-list-page">
+      <div className="loading">Loading chats...</div>
+    </div>
+  );
 
   return (
-    <div className="chats-page">
-      <HeadBar />
-      <div className="chats-container">
-        <h1>Your Messages</h1>
-        
-        {chats.length === 0 ? (
-          <div className="no-chats">
-            <p>You don't have any messages yet.</p>
-            <p>Browse the <Link to="/market">marketplace</Link> and contact sellers to start chatting!</p>
-          </div>
-        ) : (
-          <div className="chats-list">
-            {chats.map(chat => (
-              <Link to={`/chats/${chat.id}`} key={chat.id} className="chat-item">
-                <div className="chat-item-image">
-                  <img 
-                    src={chat.product_image || "/api/placeholder/100/100"} 
-                    alt={chat.product_name} 
-                  />
-                </div>
-                <div className="chat-item-details">
-                  <h3>{chat.product_name}</h3>
-                  <p className="chat-item-price">${chat.product_price.toLocaleString()}</p>
-                  <p className="chat-partner">
-                    {chat.buyer_name === chat.seller_name ? 'You' : chat.buyer_name} • {chat.seller_name === chat.buyer_name ? 'You' : chat.seller_name}
-                  </p>
-                </div>
-              </Link>
-            ))}
-          </div>
-        )}
-      </div>
+    <div className="chats-list-page">
+      <h1>Messages</h1>
+      
+      {chats.length === 0 ? (
+        <div className="no-chats">
+          <p>You don't have any messages yet.</p>
+          <Link to="/market" className="browse-button">Browse Products</Link>
+        </div>
+      ) : (
+        <div className="chats-list">
+          {chats.map(chat => (
+            <Link to={`/chats/${chat.id}`} key={chat.id} className="chat-item">
+              <div className="chat-item-image">
+                <img 
+                  src={chat.product?.image_path || "/api/placeholder/150/150"} 
+                  alt={chat.product?.name || "Product"} 
+                />
+              </div>
+              <div className="chat-item-details">
+                <h3 className="chat-item-title">{chat.product?.name || "Unknown Product"}</h3>
+                <p className="chat-item-price">${chat.product?.price?.toLocaleString() || "0"}</p>
+                <p className="chat-contact">
+                  {chat.buyer?.email === authAxios.defaults.headers.common['Authorization'] 
+                    ? `Seller: ${chat.seller?.email}` 
+                    : `Buyer: ${chat.buyer?.email}`}
+                </p>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -941,141 +1030,270 @@ function ChatPage() {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [sending, setSending] = useState(false);
   const messagesEndRef = useRef(null);
   const [socket, setSocket] = useState(null);
 
+  // Initialize socket connection
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/');
       return;
     }
 
+    console.log('Initializing socket connection...');
     // Initialize socket.io client with auth token
-    const newSocket = io('http://localhost:3001', {
-      auth: {
-        token: localStorage.getItem('token')
-      }
+    const token = localStorage.getItem('token');
+    console.log('Using token for socket auth:', token ? 'Token exists' : 'No token');
+
+    const newSocket = io(SOCKET_URL, {
+      auth: { token },
+      transports: ['websocket', 'polling'], // Try both websocket and polling
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
 
     newSocket.on('connect', () => {
-      console.log('Connected to socket server');
+      console.log('Socket connected successfully!', newSocket.id);
+      setSocketConnected(true);
+      
+      // Join the chat room once connected
+      console.log(`Joining chat room: ${id}`);
+      newSocket.emit('join_chat', id);
     });
 
     newSocket.on('connect_error', (error) => {
-      // Just log the error, don't show alert since messages still work through HTTP
-      console.error('Socket connection error:', error);
+      console.error('Socket connection error:', error.message);
+      // Try to reconnect automatically
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      setSocketConnected(false);
+    });
+
+    newSocket.on('error', (error) => {
+      console.error('Socket error:', error);
     });
 
     setSocket(newSocket);
 
+    // Cleanup function
     return () => {
+      console.log('Cleaning up socket connection');
       if (newSocket) {
         newSocket.disconnect();
       }
     };
-  }, [isAuthenticated, navigate]);
+  }, [isAuthenticated, navigate, id]);
 
+  // Listen for new messages and other events
   useEffect(() => {
     if (!socket) return;
 
-    // Join the chat room
-    socket.emit('join_chat', id);
+    console.log('Setting up message listeners');
 
-    // Listen for new messages
+    // Listen for new messages from other users
     socket.on('new_message', (message) => {
-      setMessages(prevMessages => {
-        // Avoid duplicate messages
-        if (prevMessages.some(m => m.id === message.id)) {
-          return prevMessages;
-        }
-        return [...prevMessages, message];
-      });
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      console.log('Received new message via socket:', message);
+      
+      // Only add messages from others, not from ourselves (to prevent duplicates)
+      if (message.sender_id !== currentUser.id) {
+        setMessages(prevMessages => {
+          // Avoid duplicate messages
+          if (prevMessages.some(m => m.id === message.id)) {
+            return prevMessages;
+          }
+          // Use a safe immutable update
+          return [...prevMessages, message];
+        });
+      }
     });
-
-    // Listen for errors
-    socket.on('error', (error) => {
-      console.error('Socket error:', error);
-      alert('Error: ' + error);
-    });
-
-    // Cleanup
+    
+    // Cleanup on unmount
     return () => {
-      socket.emit('leave_chat', id);
+      console.log('Removing socket listeners');
       socket.off('new_message');
-      socket.off('error');
     };
-  }, [socket, id]);
+  }, [socket, currentUser.id]);
+  
+  // Scroll to bottom when messages change - in separate effect to prevent render issues
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      try {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      } catch (err) {
+        console.error('Error scrolling to bottom:', err);
+      }
+    }
+  }, [messages]);
 
+  // Fetch chat and message data
   useEffect(() => {
     const fetchChatAndMessages = async () => {
+      console.log(`Fetching chat and messages for chat ID: ${id}`);
       try {
         // Get chat details
         const chatResponse = await authAxios.get(`/chats/${id}`);
+        console.log('Chat data received:', chatResponse.data);
         setChat(chatResponse.data);
         
         // Get messages
         const messagesResponse = await authAxios.get(`/chats/${id}/messages`);
+        console.log('Messages received:', messagesResponse.data.length);
         setMessages(messagesResponse.data);
         
-        // Scroll to bottom after loading messages
+        // Initial scroll to bottom after loading messages
         setTimeout(() => {
-          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+          if (messagesEndRef.current) {
+            messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
+          }
         }, 100);
       } catch (err) {
-        console.error('Error fetching chat data:', err);
+        console.error('Error fetching chat data:', err.response?.data || err.message);
+        alert(`Failed to load chat: ${err.response?.data?.error || err.message}`);
         navigate('/chats');
       } finally {
         setLoading(false);
       }
     };
 
-    if (isAuthenticated) {
+    if (isAuthenticated && id) {
       fetchChatAndMessages();
     }
   }, [authAxios, id, isAuthenticated, navigate]);
 
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     
-    if (!newMessage.trim()) return;
+    const messageText = newMessage.trim();
+    if (!messageText || sending) return;
+    
+    setSending(true);
+    console.log(`Sending message in chat ${id}: ${messageText}`);
+    
+    // Clear input immediately for better UX
+    setNewMessage('');
+    
+    // Add optimistic message (temporary)
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMessage = {
+      id: tempId,
+      chat_id: id,
+      sender_id: currentUser.id,
+      message: messageText,
+      created_at: new Date().toISOString(),
+      sender: { email: currentUser.email },
+      temporary: true
+    };
+    
+    // Add to state with immutable update pattern
+    setMessages(prev => [...prev, optimisticMessage]);
     
     try {
-      // Send message to server
-      const response = await authAxios.post(`/chats/${id}/messages`, {
-        message: newMessage.trim()
-      });
-
-      // Clear input immediately for better UX
-      setNewMessage('');
-
-      // Add message to local state
-      setMessages(prevMessages => [...prevMessages, response.data.data]);
+      let finalMessageId = tempId;
       
-      // Scroll to bottom
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      // Always use REST API for reliable message persistence
+      console.log('Sending via REST API');
+      const response = await authAxios.post(`/chats/${id}/messages`, {
+        message: messageText
+      });
+      
+      console.log('Message sent successfully via REST API:', response.data);
+      finalMessageId = response.data.id;
+      
+      // Replace optimistic message with real one
+      setMessages(prev => prev.map(msg => 
+        msg.id === tempId ? {...response.data, id: response.data.id} : msg
+      ));
+      
+      // Also send through socket for real-time delivery to other users if connected
+      if (socket && socketConnected) {
+        console.log('Also notifying via socket');
+        socket.emit('new_message_notification', {
+          chat_id: id,
+          message_id: finalMessageId
+        });
+      }
     } catch (err) {
-      console.error('Error sending message:', err);
-      alert('Failed to send message. Please try again.');
+      console.error('Error sending message:', err.response?.data || err.message);
+      
+      // Remove optimistic message on failure
+      setMessages(prev => prev.filter(msg => msg.id !== tempId));
+      
+      // Put the text back in the input field
+      setNewMessage(messageText);
+      
+      // Show error with timeout to prevent UI issues
+      setTimeout(() => {
+        alert(`Failed to send message: ${err.response?.data?.error || err.message}`);
+      }, 100);
+    } finally {
+      setSending(false);
     }
+  };
+
+  const formatMessageTime = (timestamp) => {
+    const messageDate = new Date(timestamp);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    // Check if message is from today
+    if (messageDate.toDateString() === today.toDateString()) {
+      return messageDate.toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true 
+      });
+    }
+    
+    // Check if message is from yesterday
+    if (messageDate.toDateString() === yesterday.toDateString()) {
+      return `Yesterday ${messageDate.toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true 
+      })}`;
+    }
+    
+    // Otherwise show date and time
+    return messageDate.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric'
+    }) + ' ' + messageDate.toLocaleTimeString([], { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      hour12: true 
+    });
   };
 
   if (loading) return (
     <div className="chat-page">
-      <HeadBar />
       <div className="loading">Loading chat...</div>
     </div>
   );
 
   return (
     <div className="chat-page">
-      <HeadBar />
       <div className="chat-container">
         <div className="chat-header">
           <Link to="/chats" className="back-button">← Back to Messages</Link>
           <div className="chat-header-info">
-            <h2>{chat?.product_name}</h2>
-            <p className="chat-header-price">${chat?.product_price?.toLocaleString()}</p>
+            <h2>{chat?.product?.name || "Unknown Product"}</h2>
+            <p className="chat-header-price">${chat?.product?.price?.toLocaleString() || "0"}</p>
+            <p className="chat-header-users">
+              {currentUser.id === chat?.seller_id 
+                ? `Chatting with buyer: ${chat?.buyer?.email}` 
+                : `Chatting with seller: ${chat?.seller?.email}`}
+            </p>
           </div>
         </div>
         
@@ -1085,40 +1303,84 @@ function ChatPage() {
               <p>No messages yet. Start the conversation!</p>
             </div>
           ) : (
-            messages.map(message => (
-              <div 
-                key={message.id} 
-                className={`message ${message.sender_id === currentUser.id ? 'sent' : 'received'}`}
-              >
-                <div className="message-content">
-                  <p>{message.message}</p>
-                  <span className="message-time">
-                    {new Date(message.created_at).toLocaleTimeString([], { 
-                      hour: '2-digit', 
-                      minute: '2-digit',
-                      hour12: true 
-                    })}
-                  </span>
-                </div>
-              </div>
-            ))
+            <>
+              {messages.map((message, index) => {
+                // Skip rendering invalid messages
+                if (!message || !message.id) {
+                  console.warn('Skipping invalid message:', message);
+                  return null;
+                }
+                
+                try {
+                  // Determine if this is the first message of the day
+                  const showDate = index === 0 || 
+                    new Date(message.created_at).toDateString() !== 
+                    new Date(messages[index - 1].created_at).toDateString();
+                  
+                  // Determine if the previous message was from the same sender
+                  const sameSenderAsPrevious = index > 0 && 
+                    message.sender_id === messages[index - 1].sender_id;
+                  
+                  return (
+                    <Fragment key={message.id}>
+                      {showDate && (
+                        <div className="message-date-separator">
+                          <span>{new Date(message.created_at).toLocaleDateString([], {
+                            weekday: 'long',
+                            month: 'long',
+                            day: 'numeric'
+                          })}</span>
+                        </div>
+                      )}
+                      <div 
+                        className={`message ${message.sender_id === currentUser.id ? 'sent' : 'received'} ${sameSenderAsPrevious ? 'grouped' : ''} ${message.temporary ? 'pending' : ''}`}
+                      >
+                        <div className="message-content">
+                          <p>{message.message}</p>
+                          <span className="message-time">
+                            {formatMessageTime(message.created_at)}
+                            {message.temporary && <span className="message-status">Sending...</span>}
+                          </span>
+                        </div>
+                      </div>
+                    </Fragment>
+                  );
+                } catch (err) {
+                  console.error('Error rendering message:', err, message);
+                  return null;
+                }
+              })}
+            </>
           )}
-          <div ref={messagesEndRef} />
+          <div ref={messagesEndRef} className="messages-end-ref" />
         </div>
         
         <form onSubmit={handleSendMessage} className="message-form">
-          <input
-            type="text"
+          <textarea
             value={newMessage}
             onChange={(e) => setNewMessage(e.target.value)}
             placeholder="Type a message..."
             className="message-input"
             autoComplete="off"
+            disabled={sending}
+            onKeyDown={(e) => {
+              // Submit on Enter (without Shift)
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage(e);
+              }
+            }}
           />
-          <button type="submit" className="send-button">
-            Send
+          <button type="submit" className="send-button" disabled={sending || !newMessage.trim()}>
+            {sending ? 'Sending...' : 'Send'}
           </button>
         </form>
+        
+        {!socketConnected && (
+          <div className="socket-status">
+            <p>Not connected to real-time service. Messages may be delayed.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1130,40 +1392,54 @@ function ProtectedRoute({ children }) {
 }
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
+
   return (
     <Router>
       <AuthProvider>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/market" element={<MarketPage />} />
-          <Route path="/product/:id" element={<ProductDetailPage />} />
-          <Route 
-            path="/create-product" 
-            element={
-              <ProtectedRoute>
-                <CreateProductPage />
-              </ProtectedRoute>
-            } 
-          />
-          <Route 
-            path="/chats" 
-            element={
-              <ProtectedRoute>
-                <ChatsListPage />
-              </ProtectedRoute>
-            } 
-          />
-          <Route 
-            path="/chats/:id" 
-            element={
-              <ProtectedRoute>
-                <ChatPage />
-              </ProtectedRoute>
-            } 
-          />
-        </Routes>
+        <AppContent />
       </AuthProvider>
     </Router>
+  );
+}
+
+function AppContent() {
+  const { isAuthenticated } = useAuth();
+  
+  return (
+    <>
+      {isAuthenticated && <HeadBar />}
+      <Routes>
+        <Route 
+          path="/" 
+          element={isAuthenticated ? <Navigate to="/home" /> : <SignInPage />} 
+        />
+        <Route 
+          path="/home" 
+          element={isAuthenticated ? <HomePage /> : <Navigate to="/" />} 
+        />
+        <Route 
+          path="/market" 
+          element={isAuthenticated ? <MarketPage /> : <Navigate to="/" />} 
+        />
+        <Route 
+          path="/product/:id" 
+          element={isAuthenticated ? <ProductDetailPage /> : <Navigate to="/" />} 
+        />
+        <Route 
+          path="/create-product" 
+          element={isAuthenticated ? <CreateProductPage /> : <Navigate to="/" />} 
+        />
+        <Route 
+          path="/chats" 
+          element={isAuthenticated ? <ChatsListPage /> : <Navigate to="/" />} 
+        />
+        <Route 
+          path="/chats/:id" 
+          element={isAuthenticated ? <ChatPage /> : <Navigate to="/" />} 
+        />
+      </Routes>
+    </>
   );
 }
 
